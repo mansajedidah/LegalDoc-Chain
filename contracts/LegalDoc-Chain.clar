@@ -224,3 +224,196 @@
         )
     )
 )
+
+
+;; Add to Data Maps
+(define-map document-comments
+    { doc-id: (string-ascii 36), comment-id: uint }
+    { 
+        author: principal,
+        content: (string-ascii 500),
+        timestamp: uint
+    }
+)
+
+(define-data-var next-comment-id uint u0)
+
+(define-private (get-next-comment-id)
+    (begin
+        (var-set next-comment-id (+ (var-get next-comment-id) u1))
+        (var-get next-comment-id)
+    )
+)
+
+(define-public (add-document-comment (doc-id (string-ascii 36)) (content (string-ascii 500)))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (can-access-document doc-id tx-sender)
+                (ok (map-set document-comments
+                    { doc-id: doc-id, comment-id: (get-next-comment-id) }
+                    { author: tx-sender, content: content, timestamp: stacks-block-height }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+
+
+(define-map groups 
+    { group-id: uint }
+    { 
+        name: (string-ascii 50),
+        owner: principal,
+        members: (list 50 principal)
+    }
+)
+
+(define-data-var next-group-id uint u0)
+
+(define-public (create-group (name (string-ascii 50)))
+    (let ((group-id (+ (var-get next-group-id) u1)))
+        (begin
+            (var-set next-group-id group-id)
+            (ok (map-set groups
+                { group-id: group-id }
+                { name: name, owner: tx-sender, members: (list tx-sender) }))
+        )
+    )
+)
+
+
+(define-map document-tags
+    { doc-id: (string-ascii 36) }
+    { tags: (list 20 (string-ascii 20)) }
+)
+
+(define-public (add-document-tags (doc-id (string-ascii 36)) (tags (list 20 (string-ascii 20))))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (can-access-document doc-id tx-sender)
+                (ok (map-set document-tags
+                    { doc-id: doc-id }
+                    { tags: tags }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+(define-public (remove-document-tags (doc-id (string-ascii 36)) (tags (list 20 (string-ascii 20))))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (can-access-document doc-id tx-sender)
+                (ok (map-set document-tags
+                    { doc-id: doc-id }
+                    { tags: tags }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+(define-public (get-document-tags (doc-id (string-ascii 36)))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (ok (map-get? document-tags { doc-id: doc-id }))
+            err-document-not-found
+        )
+    )
+)
+(define-public (get-group-members (group-id uint))
+    (let ((group (map-get? groups { group-id: group-id })))
+        (match group
+            existing-group (ok (get members existing-group))
+            err-document-not-found
+        )
+    )
+)
+
+
+(define-map document-priority
+    { doc-id: (string-ascii 36) }
+    { 
+        level: uint,
+        updated-at: uint
+    }
+)
+
+(define-public (set-document-priority (doc-id (string-ascii 36)) (level uint))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (is-eq (get owner existing-doc) tx-sender)
+                (ok (map-set document-priority
+                    { doc-id: doc-id }
+                    { level: level, updated-at: stacks-block-height }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+
+(define-map document-reviews
+    { doc-id: (string-ascii 36), reviewer: principal }
+    {
+        status: (string-ascii 20),
+        comments: (string-ascii 500),
+        timestamp: uint
+    }
+)
+
+(define-public (submit-review (doc-id (string-ascii 36)) (status (string-ascii 20)) (comments (string-ascii 500)))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (can-access-document doc-id tx-sender)
+                (ok (map-set document-reviews
+                    { doc-id: doc-id, reviewer: tx-sender }
+                    { status: status, comments: comments, timestamp: stacks-block-height }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+
+
+(define-map document-dependencies
+    { doc-id: (string-ascii 36) }
+    { dependent-docs: (list 10 (string-ascii 36)) }
+)
+
+(define-public (set-dependencies (doc-id (string-ascii 36)) (dependencies (list 10 (string-ascii 36))))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (is-eq (get owner existing-doc) tx-sender)
+                (ok (map-set document-dependencies
+                    { doc-id: doc-id }
+                    { dependent-docs: dependencies }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+
+
+(define-map archived-documents
+    { doc-id: (string-ascii 36) }
+    {
+        archive-date: uint,
+        reason: (string-ascii 100),
+        can-restore: bool
+    }
+)
+
+(define-public (archive-document (doc-id (string-ascii 36)) (reason (string-ascii 100)))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (is-eq (get owner existing-doc) tx-sender)
+                (ok (map-set archived-documents
+                    { doc-id: doc-id }
+                    { archive-date: stacks-block-height, reason: reason, can-restore: true }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
