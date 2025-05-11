@@ -417,3 +417,92 @@
         )
     )
 )
+
+
+
+(define-map document-workflow-states
+    { doc-id: (string-ascii 36) }
+    {
+        current-state: (string-ascii 20),
+        last-updated: uint,
+        updated-by: principal
+    }
+)
+
+(define-constant valid-states (list 
+    "draft"
+    "review"
+    "approved" 
+    "executed"
+    "rejected"
+))
+
+(define-read-only (is-valid-state (state (string-ascii 8)))
+    (is-some (index-of valid-states state))
+)
+
+(define-public (update-document-state (doc-id (string-ascii 36)) (new-state (string-ascii 8)))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (and 
+                    (can-access-document doc-id tx-sender)
+                    (is-valid-state new-state))
+                (ok (map-set document-workflow-states
+                    { doc-id: doc-id }
+                    {
+                        current-state: new-state,
+                        last-updated: stacks-block-height,
+                        updated-by: tx-sender
+                    }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+
+
+(define-map sharing-links
+    { link-id: (string-ascii 64) }
+    {
+        doc-id: (string-ascii 36),
+        creator: principal,
+        expiry: uint,
+        uses-left: uint
+    }
+)
+
+(define-public (create-sharing-link 
+    (doc-id (string-ascii 36)) 
+    (link-id (string-ascii 64))
+    (expiry-blocks uint)
+    (max-uses uint))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (can-access-document doc-id tx-sender)
+                (ok (map-set sharing-links
+                    { link-id: link-id }
+                    {
+                        doc-id: doc-id,
+                        creator: tx-sender,
+                        expiry: (+ stacks-block-height expiry-blocks),
+                        uses-left: max-uses
+                    }))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+(define-read-only (validate-sharing-link (link-id (string-ascii 64)))
+    (let ((link-data (map-get? sharing-links { link-id: link-id })))
+        (match link-data
+            link (if (and
+                    (> (get expiry link) stacks-block-height)
+                    (> (get uses-left link) u0))
+                (ok true)
+                (err u403))
+            (err u404)
+        )
+    )
+)
