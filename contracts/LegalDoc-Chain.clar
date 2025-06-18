@@ -9,6 +9,42 @@
 (define-constant err-document-exists (err u101))
 (define-constant err-document-not-found (err u102))
 
+
+(define-constant err-signature-exists (err u103))
+(define-constant err-signature-not-required (err u104))
+(define-constant err-invalid-signature-order (err u105))
+(define-constant err-document-already-signed (err u106))
+
+(define-map document-signature-requirements
+    { doc-id: (string-ascii 36) }
+    {
+        required-signers: (list 10 principal),
+        require-order: bool,
+        deadline: uint,
+        created-by: principal
+    }
+)
+
+(define-map document-signatures
+    { doc-id: (string-ascii 36), signer: principal }
+    {
+        signature-hash: (string-ascii 64),
+        signed-at: uint,
+        signature-order: uint
+    }
+)
+
+(define-map signature-status
+    { doc-id: (string-ascii 36) }
+    {
+        total-required: uint,
+        total-signed: uint,
+        is-complete: bool,
+        completed-at: (optional uint)
+    }
+)
+
+
 ;; Data Maps
 (define-map documents
     { doc-id: (string-ascii 36) }
@@ -505,4 +541,162 @@
             (err u404)
         )
     )
+)
+
+
+(define-public (use-sharing-link (link-id (string-ascii 64)))
+    (let ((link-data (map-get? sharing-links { link-id: link-id })))
+        (match link-data
+            link (if (and
+                    (> (get expiry link) stacks-block-height)
+                    (> (get uses-left link) u0))
+                (begin
+                    (map-set sharing-links
+                        { link-id: link-id }
+                        {
+                            doc-id: (get doc-id link),
+                            creator: (get creator link),
+                            expiry: (get expiry link),
+                            uses-left: (- (get uses-left link) u1)
+                        })
+                    (ok true))
+                (err u403))
+            (err u404)
+        )
+    )
+)
+
+
+(define-public (get-sharing-link-doc (link-id (string-ascii 64)))
+    (let ((link-data (map-get? sharing-links { link-id: link-id })))
+        (match link-data
+            link (if (> (get expiry link) stacks-block-height)
+                (ok (get doc-id link))
+                (err u403))
+            (err u404)
+        )
+    )
+)
+
+
+;; Public Functions
+(define-public (setup-signature-requirements 
+    (doc-id (string-ascii 36))
+    (required-signers (list 10 principal))
+    (require-order bool)
+    (deadline-blocks uint))
+    (let ((doc (get-document doc-id)))
+        (match doc
+            existing-doc (if (is-eq (get owner existing-doc) tx-sender)
+                (begin
+                    (map-set document-signature-requirements
+                        { doc-id: doc-id }
+                        {
+                            required-signers: required-signers,
+                            require-order: require-order,
+                            deadline: (+ stacks-block-height deadline-blocks),
+                            created-by: tx-sender
+                        })
+                    (ok (map-set signature-status
+                        { doc-id: doc-id }
+                        {
+                            total-required: (len required-signers),
+                            total-signed: u0,
+                            is-complete: false,
+                            completed-at: none
+                        })))
+                err-not-authorized)
+            err-document-not-found
+        )
+    )
+)
+
+(define-public (sign-document (doc-id (string-ascii 36)) (signature-hash (string-ascii 64)))
+    (let ((requirements (map-get? document-signature-requirements { doc-id: doc-id }))
+          (existing-signature (map-get? document-signatures { doc-id: doc-id, signer: tx-sender }))
+          (current-status (map-get? signature-status { doc-id: doc-id })))
+        (if (is-some existing-signature)
+            err-signature-exists
+            (match requirements
+                reqs (if (is-some (index-of (get required-signers reqs) tx-sender))
+                    (match current-status
+                        status (let ((new-signed-count (+ (get total-signed status) u1))
+                                   (is-now-complete (is-eq new-signed-count (get total-required status))))
+                            (begin
+                                (map-set document-signatures
+                                    { doc-id: doc-id, signer: tx-sender }
+                                    {
+                                        signature-hash: signature-hash,
+                                        signed-at: stacks-block-height,
+                                        signature-order: new-signed-count
+                                    })
+                                (ok (map-set signature-status
+                                    { doc-id: doc-id }
+                                    {
+                                        total-required: (get total-required status),
+                                        total-signed: new-signed-count,
+                                        is-complete: is-now-complete,
+                                        completed-at: (if is-now-complete (some stacks-block-height) none)
+                                    }))))
+                        err-document-not-found)
+                    err-not-authorized)
+                err-signature-not-required)
+        )
+    )
+)
+
+(define-public (revoke-signature (doc-id (string-ascii 36)))
+    (let ((existing-signature (map-get? document-signatures { doc-id: doc-id, signer: tx-sender }))
+          (current-status (map-get? signature-status { doc-id: doc-id })))
+        (match existing-signature
+            signature (match current-status
+                status (begin
+                    (map-delete document-signatures { doc-id: doc-id, signer: tx-sender })
+                    (ok (map-set signature-status
+                        { doc-id: doc-id }
+                        {
+                            total-required: (get total-required status),
+                            total-signed: (- (get total-signed status) u1),
+                            is-complete: false,
+                            completed-at: none
+                        })))
+                err-document-not-found)
+            err-document-not-found
+        )
+    )
+)
+
+;; Read-Only Functions
+(define-read-only (get-signature-requirements (doc-id (string-ascii 36)))
+    (map-get? document-signature-requirements { doc-id: doc-id })
+)
+
+(define-read-only (get-document-signature (doc-id (string-ascii 36)) (signer principal))
+    (map-get? document-signatures { doc-id: doc-id, signer: signer })
+)
+
+(define-read-only (get-signature-status (doc-id (string-ascii 36)))
+    (map-get? signature-status { doc-id: doc-id })
+)
+
+(define-read-only (is-document-fully-signed (doc-id (string-ascii 36)))
+    (match (map-get? signature-status { doc-id: doc-id })
+        status (get is-complete status)
+        false
+    )
+)
+
+(define-read-only (has-user-signed (doc-id (string-ascii 36)) (user principal))
+    (is-some (map-get? document-signatures { doc-id: doc-id, signer: user }))
+)
+
+(define-read-only (get-pending-signers (doc-id (string-ascii 36)))
+    (match (map-get? document-signature-requirements { doc-id: doc-id })
+        reqs (ok (filter check-unsigned-status (get required-signers reqs)))
+        err-document-not-found
+    )
+)
+
+(define-private (check-unsigned-status (signer principal))
+    (not (has-user-signed "temp-doc-id" signer))
 )
