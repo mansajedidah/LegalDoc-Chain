@@ -15,6 +15,77 @@
 (define-constant err-invalid-signature-order (err u105))
 (define-constant err-document-already-signed (err u106))
 
+
+(define-constant err-notarization-exists (err u200))
+(define-constant err-notarization-not-found (err u201))
+(define-constant err-witness-already-verified (err u202))
+(define-constant err-insufficient-witnesses (err u203))
+(define-constant err-notarization-expired (err u204))
+(define-constant err-dispute-exists (err u205))
+(define-constant err-insufficient-fee (err u206))
+(define-constant err-witness-not-qualified (err u207))
+
+(define-constant notarization-fee u100)
+(define-constant witness-reward u20)
+(define-constant min-witnesses u2)
+(define-constant max-witnesses u5)
+(define-constant notarization-validity-blocks u144000)
+
+(define-map notarization-requests
+    { doc-id: (string-ascii 36) }
+    {
+        requester: principal,
+        requested-at: uint,
+        expires-at: uint,
+        witnesses-required: uint,
+        fee-paid: uint,
+        status: (string-ascii 20)
+    }
+)
+
+(define-map witness-qualifications
+    { witness: principal }
+    {
+        verified: bool,
+        reputation-score: uint,
+        total-notarizations: uint,
+        successful-disputes: uint
+    }
+)
+
+(define-map notarization-witnesses
+    { doc-id: (string-ascii 36), witness: principal }
+    {
+        verified-at: uint,
+        witness-signature: (string-ascii 64),
+        witness-statement: (string-ascii 200)
+    }
+)
+
+(define-map completed-notarizations
+    { doc-id: (string-ascii 36) }
+    {
+        notarized-at: uint,
+        notary-seal: (string-ascii 64),
+        witness-count: uint,
+        valid-until: uint,
+        certificate-hash: (string-ascii 64)
+    }
+)
+
+(define-map notarization-disputes
+    { doc-id: (string-ascii 36) }
+    {
+        disputed-by: principal,
+        disputed-at: uint,
+        dispute-reason: (string-ascii 300),
+        resolution-status: (string-ascii 20),
+        resolved-at: (optional uint)
+    }
+)
+
+(define-data-var contract-balance uint u0)
+
 (define-map document-signature-requirements
     { doc-id: (string-ascii 36) }
     {
@@ -541,6 +612,178 @@
             (err u404)
         )
     )
+)
+
+
+(define-public (register-witness (witness principal))
+    (ok (map-set witness-qualifications
+        { witness: witness }
+        {
+            verified: true,
+            reputation-score: u100,
+            total-notarizations: u0,
+            successful-disputes: u0
+        }))
+)
+
+(define-public (request-notarization (doc-id (string-ascii 36)) (witnesses-needed uint))
+    (let ((doc (get-document doc-id))
+          (existing-request (map-get? notarization-requests { doc-id: doc-id })))
+        (if (is-some existing-request)
+            err-notarization-exists
+            (match doc
+                existing-doc (if (and
+                        (is-eq (get owner existing-doc) tx-sender)
+                        (>= witnesses-needed min-witnesses)
+                        (<= witnesses-needed max-witnesses))
+                    (begin
+                        (try! (stx-transfer? notarization-fee tx-sender (as-contract tx-sender)))
+                        (var-set contract-balance (+ (var-get contract-balance) notarization-fee))
+                        (ok (map-set notarization-requests
+                            { doc-id: doc-id }
+                            {
+                                requester: tx-sender,
+                                requested-at: stacks-block-height,
+                                expires-at: (+ stacks-block-height u1440),
+                                witnesses-required: witnesses-needed,
+                                fee-paid: notarization-fee,
+                                status: "pending"
+                            })))
+                    err-not-authorized)
+                err-document-not-found)
+        )
+    )
+)
+
+(define-public (witness-verify (doc-id (string-ascii 36)) (witness-signature (string-ascii 64)) (statement (string-ascii 200)))
+    (let ((request (map-get? notarization-requests { doc-id: doc-id }))
+          (witness-qual (map-get? witness-qualifications { witness: tx-sender }))
+          (existing-witness (map-get? notarization-witnesses { doc-id: doc-id, witness: tx-sender })))
+        (if (is-some existing-witness)
+            err-witness-already-verified
+            (match request
+                req (if (< stacks-block-height (get expires-at req))
+                    (match witness-qual
+                        qual (if (get verified qual)
+                            (ok (map-set notarization-witnesses
+                                { doc-id: doc-id, witness: tx-sender }
+                                {
+                                    verified-at: stacks-block-height,
+                                    witness-signature: witness-signature,
+                                    witness-statement: statement
+                                }))
+                            err-witness-not-qualified)
+                        err-witness-not-qualified)
+                    err-notarization-expired)
+                err-notarization-not-found)
+        )
+    )
+)
+
+(define-public (complete-notarization (doc-id (string-ascii 36)) (notary-seal (string-ascii 64)) (certificate-hash (string-ascii 64)))
+    (let ((request (map-get? notarization-requests { doc-id: doc-id }))
+          (witness-count (count-witnesses doc-id)))
+        (match request
+            req (if (and
+                    (is-eq (get requester req) tx-sender)
+                    (>= witness-count (get witnesses-required req)))
+                (begin
+                    (map-set notarization-requests
+                        { doc-id: doc-id }
+                        {
+                            requester: (get requester req),
+                            requested-at: (get requested-at req),
+                            expires-at: (get expires-at req),
+                            witnesses-required: (get witnesses-required req),
+                            fee-paid: (get fee-paid req),
+                            status: "completed"
+                        })
+                    (map-set completed-notarizations
+                        { doc-id: doc-id }
+                        {
+                            notarized-at: stacks-block-height,
+                            notary-seal: notary-seal,
+                            witness-count: witness-count,
+                            valid-until: (+ stacks-block-height notarization-validity-blocks),
+                            certificate-hash: certificate-hash
+                        })
+                    (ok (distribute-witness-rewards doc-id)))
+                err-insufficient-witnesses)
+            err-notarization-not-found)
+    )
+)
+
+(define-public (dispute-notarization (doc-id (string-ascii 36)) (reason (string-ascii 300)))
+    (let ((notarization (map-get? completed-notarizations { doc-id: doc-id }))
+          (existing-dispute (map-get? notarization-disputes { doc-id: doc-id })))
+        (if (is-some existing-dispute)
+            err-dispute-exists
+            (match notarization
+                notary (if (< stacks-block-height (get valid-until notary))
+                    (ok (map-set notarization-disputes
+                        { doc-id: doc-id }
+                        {
+                            disputed-by: tx-sender,
+                            disputed-at: stacks-block-height,
+                            dispute-reason: reason,
+                            resolution-status: "pending",
+                            resolved-at: none
+                        }))
+                    err-notarization-expired)
+                err-notarization-not-found)
+        )
+    )
+)
+
+(define-private (count-witnesses (doc-id (string-ascii 36)))
+    (let ((witness-list (get-all-witnesses doc-id)))
+        (len witness-list)
+    )
+)
+
+(define-private (get-all-witnesses (doc-id (string-ascii 36)))
+    (list)
+)
+
+(define-private (distribute-witness-rewards (doc-id (string-ascii 36)))
+    (let ((total-reward (* witness-reward (count-witnesses doc-id))))
+        (if (>= (var-get contract-balance) total-reward)
+            (begin
+                (var-set contract-balance (- (var-get contract-balance) total-reward))
+                true)
+            false)
+    )
+)
+
+(define-read-only (get-notarization-request (doc-id (string-ascii 36)))
+    (map-get? notarization-requests { doc-id: doc-id })
+)
+
+(define-read-only (get-notarization-certificate (doc-id (string-ascii 36)))
+    (map-get? completed-notarizations { doc-id: doc-id })
+)
+
+(define-read-only (is-document-notarized (doc-id (string-ascii 36)))
+    (match (map-get? completed-notarizations { doc-id: doc-id })
+        cert (< stacks-block-height (get valid-until cert))
+        false
+    )
+)
+
+(define-read-only (get-witness-verification (doc-id (string-ascii 36)) (witness principal))
+    (map-get? notarization-witnesses { doc-id: doc-id, witness: witness })
+)
+
+(define-read-only (get-notarization-dispute (doc-id (string-ascii 36)))
+    (map-get? notarization-disputes { doc-id: doc-id })
+)
+
+(define-read-only (get-witness-qualifications (witness principal))
+    (map-get? witness-qualifications { witness: witness })
+)
+
+(define-read-only (calculate-notarization-cost (witnesses-needed uint))
+    (+ notarization-fee (* witness-reward witnesses-needed))
 )
 
 
