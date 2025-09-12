@@ -14,6 +14,17 @@ epoch = 3.1
 path = 'contracts/ComplianceVerification.clar'
 clarity_version = 3
 epoch = 3.1
+
+[contracts.LegalDoc-Templates]
+path = 'contracts/LegalDoc-Templates.clar'
+clarity_version = 3
+epoch = 3.1
+
+[contracts.book-reco-engine]
+path = 'contracts/book-reco-engine.clar'
+clarity_version = 3
+epoch = 3.1
+
 [repl.analysis]
 passes = ['check_checker']
 

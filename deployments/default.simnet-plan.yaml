@@ -59,4 +59,9 @@ plan:
             emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
             path: "contracts\\LegalDoc-Chain.clar"
             clarity-version: 3
+        - emulated-contract-publish:
+            contract-name: LegalDoc-Templates
+            emulated-sender: ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM
+            path: "contracts\\LegalDoc-Templates.clar"
+            clarity-version: 3
       epoch: "3.1"
